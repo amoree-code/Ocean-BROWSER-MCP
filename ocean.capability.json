@@ -1,0 +1,22 @@
+{
+  "kind": "mcp",
+  "name": "dev.ocean/browser",
+  "description": "Control the owner's real, signed-in Chrome: tabs, navigation, clicks, forms, screenshots, console and network errors.",
+  "permissions": {
+    "network": ["registry.npmjs.org", "localhost", "127.0.0.1"],
+    "exec": ["npx"]
+  },
+  "server": {
+    "name": "dev.ocean/browser",
+    "description": "Chrome DevTools automation attached to the owner's running Chrome.",
+    "packages": [
+      {
+        "registryType": "npm",
+        "identifier": "ocean-browser-mcp",
+        "version": "0.1.0",
+        "transport": { "type": "stdio" }
+      }
+    ],
+    "_meta": { "dev.ocean": { "clientKey": "browser" } }
+  }
+}
