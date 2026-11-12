@@ -1,6 +1,6 @@
 {
   "kind": "mcp",
-  "name": "dev.ocean/browser",
+  "name": "dev.ocean/chrome-devtools",
   "description": "Control the owner's real, signed-in Chrome: tabs, navigation, clicks, forms, uploads, screenshots, console and network errors. Reads every open tab and acts inside any signed-in session of the attached Chrome, for every client wired to it. The filesystem permission is declared for consent but not enforced at runtime.",
   "permissions": {
     "filesystem": { "read": ["~/Library/Application Support/Google/Chrome"] },
@@ -8,7 +8,7 @@
     "exec": ["npx"]
   },
   "server": {
-    "name": "dev.ocean/browser",
+    "name": "dev.ocean/chrome-devtools",
     "description": "Chrome DevTools MCP attached to the owner's running Chrome. Usage statistics and CrUX lookups are off, so page URLs stay on this machine.",
     "packages": [
       {
