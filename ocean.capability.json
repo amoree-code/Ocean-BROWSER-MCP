@@ -1,14 +1,15 @@
 {
   "kind": "mcp",
   "name": "dev.ocean/browser",
-  "description": "Control the owner's real, signed-in Chrome: tabs, navigation, clicks, forms, screenshots, console and network errors.",
+  "description": "Control the owner's real, signed-in Chrome: tabs, navigation, clicks, forms, uploads, screenshots, console and network errors. Reads every open tab and acts inside any signed-in session of the attached Chrome, for every client wired to it. The filesystem permission is declared for consent but not enforced at runtime.",
   "permissions": {
+    "filesystem": { "read": ["~/Library/Application Support/Google/Chrome"] },
     "network": ["registry.npmjs.org", "localhost", "127.0.0.1"],
     "exec": ["npx"]
   },
   "server": {
     "name": "dev.ocean/browser",
-    "description": "Chrome DevTools automation attached to the owner's running Chrome.",
+    "description": "Chrome DevTools MCP attached to the owner's running Chrome. Usage statistics and CrUX lookups are off, so page URLs stay on this machine.",
     "packages": [
       {
         "registryType": "npm",
@@ -17,6 +18,6 @@
         "transport": { "type": "stdio" }
       }
     ],
-    "_meta": { "dev.ocean": { "clientKey": "browser" } }
+    "_meta": { "dev.ocean": { "clientKey": "chrome-devtools" } }
   }
 }

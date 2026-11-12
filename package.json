@@ -4,8 +4,31 @@
   "description": "Stdio MCP server that gives an AI client control of the owner's real Chrome, for the Ocean marketplace.",
   "type": "module",
   "license": "MIT",
-  "bin": { "ocean-browser-mcp": "bin/cli.mjs" },
-  "files": ["bin", "ocean.capability.json", "README.md"],
-  "engines": { "node": ">=20" },
-  "scripts": { "test": "node --test" }
+  "bin": {
+    "ocean-browser-mcp": "bin/cli.mjs"
+  },
+  "files": [
+    "bin/cli.mjs",
+    "ocean.capability.json",
+    "README.md"
+  ],
+  "engines": {
+    "node": "^20.19.0 || ^22.12.0 || >=23"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "chrome-devtools-mcp": "1.12.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/amoree-code/Ocean-BROWSER-MCP.git"
+  },
+  "keywords": [
+    "mcp",
+    "chrome",
+    "devtools",
+    "ocean"
+  ]
 }
