@@ -1,21 +1,38 @@
 #!/usr/bin/env node
-// Starts the pinned upstream chrome-devtools-mcp attached to the owner's running Chrome.
-// Flags keep page URLs on the machine: CrUX lookups and usage statistics are on by default upstream.
-import { spawn } from 'node:child_process';
+// Runs the pinned chrome-devtools-mcp (an exact dependency with none of its own) in this
+// process, attached to the owner's running Chrome. In-process, so a client that kills this server
+// leaves no orphan behind. CrUX lookups and usage statistics are on by default upstream; the flags
+// turn them off so page URLs stay on this machine.
+import { createRequire } from 'node:module';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
-export const UPSTREAM = 'chrome-devtools-mcp@1.12.0';
+export const UPSTREAM = 'chrome-devtools-mcp';
 export const FLAGS = ['--autoConnect', '--no-usage-statistics', '--no-performance-crux'];
 
-export function launchPlan(extra = []) {
-  return { command: 'npx', args: ['-y', UPSTREAM, ...FLAGS, ...extra] };
+const require = createRequire(import.meta.url);
+
+export function upstreamBin() {
+  const manifestFile = require.resolve(`${UPSTREAM}/package.json`);
+  const { bin, version } = require(manifestFile);
+  return { file: path.join(path.dirname(manifestFile), bin[UPSTREAM]), version };
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  const { command, args } = launchPlan(process.argv.slice(2));
-  const child = spawn(command, args, { stdio: 'inherit' });
-  child.once('error', (error) => {
-    console.error(`ocean-browser-mcp: cannot start ${command}: ${error.message}`);
-    process.exit(1);
-  });
-  child.once('exit', (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
+// Flags first, so an explicit argument from the caller can still override one.
+export function upstreamArgv(extra = []) {
+  return [...FLAGS, ...extra];
+}
+
+const invokedDirectly = (() => {
+  try {
+    return import.meta.url === pathToFileURL(require('node:fs').realpathSync(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+})();
+
+if (invokedDirectly) {
+  const { file } = upstreamBin();
+  process.argv = [process.argv[0], file, ...upstreamArgv(process.argv.slice(2))];
+  await import(pathToFileURL(file).href);
 }
