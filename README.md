@@ -15,7 +15,7 @@ capability `dev.ocean/chrome-devtools`).
    can run it directly:
 
    ```json
-   { "mcpServers": { "chrome-devtools": { "command": "npx", "args": ["-y", "ocean-browser-mcp@0.1.0"] } } }
+   { "mcpServers": { "chrome-devtools": { "command": "npx", "args": ["-y", "ocean-browser-mcp@0.2.0"] } } }
    ```
 
 3. **Chrome asks to allow each new connection.** The first browser tool a client session uses
@@ -30,6 +30,16 @@ Requires Node `^20.19 || ^22.12 || >=23` and Chrome with remote debugging enable
 screenshots, script evaluation, console messages, network requests, emulation and performance
 traces. There is no download tool: a click on a download link downloads to Chrome's own folder,
 and `chrome://` pages (the downloads list included) cannot be opened.
+
+## Token and time defaults
+
+- **Page tools return only the selected tab.** Upstream answers `new_page`, `navigate_page`,
+  `select_page`, `close_page` and the rest with every open tab, about 2K tokens a call with 25
+  tabs, and shows the agent every private tab. Here those responses keep the selected tab plus a
+  line saying how many others are open; `list_pages` still lists all of them. Set
+  `OCEAN_BROWSER_ALL_TABS=1` to get upstream's full list back.
+- **Navigation waits 30 s** by default instead of upstream's 10 s, so slow consoles (Search
+  Console, Vercel) load on the first try. A call's own `timeout` still wins.
 
 ## Security
 
