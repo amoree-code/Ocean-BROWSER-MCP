@@ -1,25 +1,60 @@
 #!/usr/bin/env node
 // Runs the pinned chrome-devtools-mcp (an exact dependency with none of its own) in this
 // process, attached to the owner's running browser. In-process, so a client that kills this
-// server leaves no orphan behind. CrUX lookups and usage statistics are on by default upstream;
-// the flags turn them off so page URLs stay on this machine.
-//
-// Two changes to upstream's output and defaults, made here so upstream stays unforked:
-// - Page tools (new_page, navigate_page, select_page, …) answer with every open tab: ~2K tokens
-//   per call with 25 tabs, and every private tab shown to the agent. Their responses keep only
-//   the selected tab and say how many others are open; `list_pages` still lists all of them.
-//   OCEAN_BROWSER_ALL_TABS=1 turns this off.
-// - Navigation waits 30 s by default instead of 10 s (slow consoles timed out); a call's own
-//   `timeout` still wins.
+// server leaves no orphan behind. Upstream stays unforked; the wrapper only sets flags, patches
+// two upstream entry points and rewrites replies on the way out:
+// - lib/config.mjs: privacy, security and token defaults, tool profiles, URL blocklist.
+// - lib/filter.mjs: tab-list trim, snapshot diff, screenshot previews, usage log.
+// - lib/cursor.mjs: visible pointer and "Ocean is driving" frame on the tab the agent uses.
+// - lib/shared.mjs: one browser connection shared by every session (one "Allow" prompt), via
+//   upstream's daemon; `ocean-browser-mcp status|stop` shows or stops it.
+// - Navigation waits 30 s by default instead of 10 s; a call's own `timeout` still wins.
+// Upstream's config-file discovery (~/.config/cd4a/config.json) is off: that file can change the
+// browser binary and its flags, and an agent able to write it could take the setup over.
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { isOff, stateDir, UPSTREAM, upstreamArgv } from '../lib/config.mjs';
+import { installCursor } from '../lib/cursor.mjs';
+import { createResponseFilter } from '../lib/filter.mjs';
+import {
+  callShared,
+  createCallSplitter,
+  daemonArgv,
+  ensureDaemon,
+  idleMinutes,
+  loadDaemonApi,
+  ourSessions,
+  sessionIdFor,
+} from '../lib/shared.mjs';
 
-export const UPSTREAM = 'chrome-devtools-mcp';
-export const FLAGS = ['--autoConnect', '--no-usage-statistics', '--no-performance-crux'];
+export { blockedPatterns, FLAGS, PROFILES, profileName, stateDir, UPSTREAM, upstreamArgv } from '../lib/config.mjs';
+export { hideDuringScreenshots, installCursor, overlayLabel, pageOverlay, patchScreenshots } from '../lib/cursor.mjs';
+export {
+  capSnapshotText,
+  createResponseFilter,
+  createTabTrimmer,
+  dietSnapshotText,
+  FULL_LIST_TOOLS,
+  prunePreviews,
+  rotateUsage,
+  savePreview,
+  snapshotMax,
+  trimPagesText,
+  trimToolResult,
+} from '../lib/filter.mjs';
+
+export {
+  createCallSplitter,
+  daemonArgv,
+  idleMinutes,
+  installIdleStop,
+  SESSION_PREFIX,
+  sessionIdFor,
+} from '../lib/shared.mjs';
+
 export const NAVIGATION_TIMEOUT_MS = 30_000;
-// The one tool whose job is listing tabs; every other tool's tab list is trimmed.
-export const FULL_LIST_TOOLS = new Set(['list_pages']);
+export const NO_CONFIG_DISCOVERY_ENV = 'CHROME_DEVTOOLS_MCP_NO_CONFIG_DISCOVERY';
 
 const require = createRequire(import.meta.url);
 
@@ -27,116 +62,6 @@ export function upstreamBin() {
   const manifestFile = require.resolve(`${UPSTREAM}/package.json`);
   const { bin, version } = require(manifestFile);
   return { file: path.join(path.dirname(manifestFile), bin[UPSTREAM]), version };
-}
-
-// Flags first, so an explicit argument from the caller can still override one.
-export function upstreamArgv(extra = []) {
-  return [...FLAGS, ...extra];
-}
-
-// The `## Pages` block of a tool's text: the selected tab, then one line for the rest.
-export function trimPagesText(text) {
-  const lines = text.split('\n');
-  const start = lines.indexOf('## Pages');
-  if (start < 0) return text;
-  let end = start + 1;
-  while (end < lines.length && !lines[end].startsWith('## ')) end += 1;
-  const pages = lines.slice(start + 1, end).filter((line) => /^\d+: /.test(line));
-  const selected = pages.filter((line) => line.includes(' [selected]'));
-  const others = pages.length - selected.length;
-  if (others === 0) return text;
-  const kept = [
-    '## Pages',
-    ...selected,
-    `(${others} other tab${others === 1 ? '' : 's'} open — list_pages shows them)`,
-  ];
-  return [...lines.slice(0, start), ...kept, ...lines.slice(end)].join('\n');
-}
-
-// One tools/call result: the text and the structured page list, trimmed alike.
-export function trimToolResult(result) {
-  if (!result || typeof result !== 'object') return result;
-  const next = { ...result };
-  if (Array.isArray(result.content))
-    next.content = result.content.map((item) =>
-      item?.type === 'text' && typeof item.text === 'string'
-        ? { ...item, text: trimPagesText(item.text) }
-        : item,
-    );
-  const structured = result.structuredContent;
-  if (structured && Array.isArray(structured.pages)) {
-    const selected = structured.pages.filter((page) => page?.selected);
-    const omitted = structured.pages.length - selected.length;
-    if (omitted > 0)
-      next.structuredContent = { ...structured, pages: selected, otherPagesOmitted: omitted };
-  }
-  return next;
-}
-
-// Newline-delimited JSON-RPC, as the stdio transport speaks it. Requests are only read, to learn
-// which tool each call id names; the responses of page tools are trimmed.
-export function createTabTrimmer() {
-  const tools = new Map();
-  let inbound = '';
-  let outbound = '';
-  const parse = (line) => {
-    try {
-      return JSON.parse(line);
-    } catch {
-      return undefined;
-    }
-  };
-  return {
-    observeInput(chunk) {
-      inbound += chunk.toString();
-      const lines = inbound.split('\n');
-      inbound = lines.pop() ?? '';
-      for (const line of lines) {
-        const message = parse(line);
-        if (message?.method === 'tools/call' && message.id !== undefined)
-          tools.set(message.id, message.params?.name);
-      }
-    },
-    // The complete lines ready to write; a partial line waits for the rest of it.
-    transformOutput(chunk) {
-      outbound += chunk.toString();
-      const lines = outbound.split('\n');
-      outbound = lines.pop() ?? '';
-      return lines
-        .map((line) => {
-          const message = parse(line);
-          if (!message || message.id === undefined || !tools.has(message.id)) return line;
-          const tool = tools.get(message.id);
-          tools.delete(message.id);
-          if (FULL_LIST_TOOLS.has(tool) || !message.result) return line;
-          return JSON.stringify({ ...message, result: trimToolResult(message.result) });
-        })
-        .map((line) => `${line}\n`)
-        .join('');
-    },
-  };
-}
-
-function installTabTrimmer() {
-  const trimmer = createTabTrimmer();
-  // Peek at stdin through emit: a 'data' listener added here would start the stream flowing
-  // before upstream's transport listens, and the first request could be lost.
-  const emit = process.stdin.emit.bind(process.stdin);
-  process.stdin.emit = (event, ...args) => {
-    if (event === 'data') trimmer.observeInput(args[0]);
-    return emit(event, ...args);
-  };
-  const write = process.stdout.write.bind(process.stdout);
-  process.stdout.write = (chunk, encoding, callback) => {
-    const done = typeof encoding === 'function' ? encoding : callback;
-    const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString();
-    const ready = trimmer.transformOutput(text);
-    if (!ready) {
-      done?.();
-      return true;
-    }
-    return write(ready, done);
-  };
 }
 
 // Upstream builds its one context through McpContext.create(logger, options) (index.js), and
@@ -153,6 +78,103 @@ export async function raiseNavigationTimeout(upstreamFile) {
     );
 }
 
+// The daemon side of shared mode: `call` runs one tool there. It throws `{ fallback: true }`
+// only when the daemon cannot be started, so the session can run the call itself; a call that
+// failed inside the daemon is reported, never run twice.
+export async function sharedRouter(upstreamFile, upstreamVersion, argv, env = process.env) {
+  const api = await loadDaemonApi(upstreamFile);
+  const dargv = daemonArgv(argv);
+  const { version } = require('../package.json');
+  // Settings the daemon reads from its environment are part of its identity too, so changing
+  // one starts a new daemon instead of reusing one started with the old value.
+  const sessionId = sessionIdFor(dargv, {
+    wrapper: version,
+    upstream: upstreamVersion,
+    cursor: !isOff(env.OCEAN_BROWSER_CURSOR),
+    idle: idleMinutes(env),
+  });
+  const daemonScript = fileURLToPath(new URL('../daemon/daemon.js', import.meta.url));
+  let starting;
+  const ensure = async () => {
+    if (api.isDaemonRunning(sessionId)) return;
+    starting ??= ensureDaemon({ api, sessionId, daemonScript, argv: dargv, env, logDir: stateDir(env) }).finally(() => {
+      starting = undefined;
+    });
+    try {
+      await starting;
+    } catch (error) {
+      throw Object.assign(error, { fallback: true });
+    }
+  };
+  return {
+    sessionId,
+    async call(name, args) {
+      try {
+        return await callShared({ api, sessionId, ensure }, name, args);
+      } catch (error) {
+        if (error?.fallback) throw error;
+        return { content: [{ type: 'text', text: `The shared browser connection failed: ${error?.message ?? error}` }], isError: true };
+      }
+    },
+  };
+}
+
+// Peek at stdin through emit: a 'data' listener added here would start the stream flowing
+// before upstream's transport listens, and the first request could be lost. In shared mode,
+// tools/call lines go to the daemon and their replies are written here; the rest reaches upstream.
+function installResponseFilter(filter, router) {
+  const emit = process.stdin.emit.bind(process.stdin);
+  const split = createCallSplitter();
+  process.stdin.emit = (event, ...args) => {
+    if (event !== 'data') return emit(event, ...args);
+    if (!router) {
+      filter.observeInput(args[0]);
+      return emit(event, ...args);
+    }
+    const { calls, rest } = split(args[0]);
+    for (const { line, message } of calls) {
+      filter.observeInput(`${line}\n`);
+      router
+        .call(message.params?.name, message.params?.arguments)
+        .then((result) => process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result })}\n`))
+        .catch(() => emit('data', Buffer.from(`${line}\n`)));
+    }
+    if (rest) {
+      filter.observeInput(rest);
+      emit('data', Buffer.from(rest));
+    }
+    return true;
+  };
+  const write = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk, encoding, callback) => {
+    const done = typeof encoding === 'function' ? encoding : callback;
+    const ready = filter.transformOutput(chunk);
+    if (!ready) {
+      done?.();
+      return true;
+    }
+    return write(ready, done);
+  };
+}
+
+// `ocean-browser-mcp status` lists the running shared daemons; `stop` stops them (the browser
+// stays open, it is only disconnected).
+async function daemonCommand(action, upstreamFile) {
+  const api = await loadDaemonApi(upstreamFile);
+  const sessions = ourSessions(api);
+  if (action === 'stop') {
+    for (const id of sessions) await api.stopDaemon(id);
+    console.log(sessions.length ? `Stopped ${sessions.length} shared browser connection(s).` : 'No shared browser connection is running.');
+    return;
+  }
+  const rows = [];
+  for (const id of sessions) {
+    const reply = await api.sendCommand({ method: 'status' }, id, 2_000).catch(() => undefined);
+    rows.push(reply?.success ? { session: id, ...JSON.parse(reply.result) } : { session: id, status: 'not answering' });
+  }
+  console.log(JSON.stringify(rows, null, 2));
+}
+
 const invokedDirectly = (() => {
   try {
     return import.meta.url === pathToFileURL(require('node:fs').realpathSync(process.argv[1])).href;
@@ -162,9 +184,20 @@ const invokedDirectly = (() => {
 })();
 
 if (invokedDirectly) {
-  const { file } = upstreamBin();
+  process.env[NO_CONFIG_DISCOVERY_ENV] = '1';
+  const { file, version } = upstreamBin();
+  const action = process.argv[2];
+  if (action === 'status' || action === 'stop') {
+    await daemonCommand(action, file);
+    process.exit(0);
+  }
+  const argv = upstreamArgv(process.argv.slice(2));
+  const filter = createResponseFilter(process.env);
   await raiseNavigationTimeout(file);
-  if (process.env.OCEAN_BROWSER_ALL_TABS !== '1') installTabTrimmer();
-  process.argv = [process.argv[0], file, ...upstreamArgv(process.argv.slice(2))];
+  // In shared mode the daemon draws the cursor; this one only runs a call the daemon could not.
+  await installCursor(file, () => filter.state.client, { overlay: !isOff(process.env.OCEAN_BROWSER_CURSOR) });
+  const router = isOff(process.env.OCEAN_BROWSER_SHARED) ? undefined : await sharedRouter(file, version, argv);
+  installResponseFilter(filter, router);
+  process.argv = [process.argv[0], file, ...argv];
   await import(pathToFileURL(file).href);
 }
