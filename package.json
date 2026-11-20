@@ -1,7 +1,7 @@
 {
   "name": "ocean-browser-mcp",
-  "version": "0.2.0",
-  "description": "Stdio MCP server that gives an AI client control of the owner's real Chrome, for the Ocean marketplace.",
+  "version": "0.3.0",
+  "description": "Stdio MCP server that gives an AI client control of the owner's real Chromium browser (Chrome, Brave, Edge, Arc…), for the Ocean marketplace.",
   "type": "module",
   "license": "MIT",
   "bin": {
@@ -9,6 +9,8 @@
   },
   "files": [
     "bin/cli.mjs",
+    "daemon/daemon.js",
+    "lib/*.mjs",
     "ocean.capability.json",
     "README.md"
   ],
@@ -19,7 +21,7 @@
     "test": "node --test"
   },
   "dependencies": {
-    "chrome-devtools-mcp": "1.12.0"
+    "chrome-devtools-mcp": "1.13.0"
   },
   "repository": {
     "type": "git",
